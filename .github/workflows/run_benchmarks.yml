@@ -55,4 +55,4 @@ jobs:
           "
 
       - name: Run benchmark
-        run: ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} "cd ~/benchmark && php tempest data:parse"
+        run: ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} "cd ~/benchmark && php85 tempest data:parse"
