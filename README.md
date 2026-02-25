@@ -125,3 +125,7 @@ This challenge was inspired by the [1 billion row challenge in Java](https://git
 #### What about the JIT?
 
 While testing this challenge, the JIT didn't seem to offer any significant performance boost. Furthermore, on occasion it caused segfaults. This led to the decision for the JIT to be disabled for this challenge.
+
+#### Can I use FFI?
+
+The point of this challenge is to push PHP to its limits. That's why you're not allowed to use FFI.
