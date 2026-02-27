@@ -2,7 +2,6 @@ name: Validate and Parse
 
 on:
   push:
-    branches: [main]
   pull_request:
 
 permissions:
