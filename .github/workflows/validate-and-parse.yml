@@ -1,0 +1,33 @@
+name: Validate and Parse
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-and-parse:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.5'
+
+      - name: Install dependencies
+        run: composer install
+
+      - name: Validate
+        run: php tempest data:validate
+
+      - name: Generate data
+        run: php tempest data:generate --force
+
+      - name: Parse data
+        run: php tempest data:parse
