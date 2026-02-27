@@ -282,7 +282,7 @@ final class BenchmarkRunCommand
         );
 
         $command = sprintf(
-            "hyperfine --warmup 0 --runs 1 --export-json %s 'cd %s && %s'",
+            "hyperfine --warmup 0 --runs 1 --show-output --export-json %s 'cd %s && %s'",
             escapeshellarg($resultFile),
             escapeshellarg($benchmarkDir),
             $parseCommand,
@@ -293,8 +293,21 @@ final class BenchmarkRunCommand
         exec($command, $output, $returnCode);
 
         if ($returnCode !== 0 || ! file_exists($resultFile)) {
+            $cleanedOutput = implode(PHP_EOL, preg_replace(
+                '/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -\/]*[@-~])/',
+                '',
+                $output
+            ));
+
             $this->prError($prNumber, "Failed to run benchmark");
-            $this->githubComment($prNumber, 'Benchmarking failed');
+            $this->githubComment($prNumber, <<<MD
+            Failed to run benchmark:
+            
+            ```
+            $cleanedOutput
+            ```
+            MD);
+
             return null;
         }
 
