@@ -9,21 +9,20 @@ use App\Commands\Visit;
 use const SEEK_CUR;
 use const WNOHANG;
 
-use function array_fill;
 use function chr;
 use function count;
 use function fclose;
 use function fgets;
-use function file_get_contents;
 use function filesize;
 use function fopen;
 use function fread;
 use function fseek;
+use function feof;
 use function ftell;
 use function fwrite;
 use function gc_disable;
 use function getmypid;
-use function pack;
+use function ord;
 use function pcntl_fork;
 use function pcntl_wait;
 use function str_replace;
@@ -35,7 +34,6 @@ use function strrpos;
 use function substr;
 use function sys_get_temp_dir;
 use function unlink;
-use function unpack;
 
 final class Parser
 {
@@ -52,8 +50,6 @@ final class Parser
     protected array $datePrefixes = [];
 
     protected int $dateCount = 0;
-
-    protected array $dateIdChars = [];
 
     protected array $pathIds = [];
 
@@ -90,8 +86,8 @@ final class Parser
                 };
                 $monthString = ($month < 10 ? '0' : '') . $month;
                 $yearMonthString = $year . '-' . $monthString . '-';
-                for ($days = 1; $days <= $maxDays; $days++) {
-                    $key = $yearMonthString . (($days < 10 ? '0' : '') . $days);
+                for ($day = 1; $day <= $maxDays; $day++) {
+                    $key = $yearMonthString . (($day < 10 ? '0' : '') . $day);
                     $this->dateIds[$key] = $this->dateCount;
                     $this->dates[$this->dateCount] = $key;
                     $this->dateCount++;
@@ -99,17 +95,13 @@ final class Parser
             }
         }
 
-        foreach ($this->dateIds as $date => $id) {
-            $this->dateIdChars[$date] = chr($id & 0xFF) . chr($id >> 8);
-        }
-
         $binaryResource = fopen($inputPath, 'rb');
         stream_set_read_buffer($binaryResource, 0);
         $warmUpSize = $this->fileSize > static::DISCOVER_SIZE ? static::DISCOVER_SIZE : $this->fileSize;
         $raw = fread($binaryResource, $warmUpSize);
 
-        for ($workers = 1; $workers < static::WORKERS; $workers++) {
-            fseek($binaryResource, (int) ($this->fileSize * $workers / static::WORKERS));
+        for ($worker = 1; $worker < static::WORKERS; $worker++) {
+            fseek($binaryResource, (int) ($this->fileSize * $worker / static::WORKERS));
             fgets($binaryResource);
             $this->boundaries[] = ftell($binaryResource);
         }
@@ -117,10 +109,15 @@ final class Parser
         fclose($binaryResource);
 
         $lastNewLine = strrpos($raw, "\n");
+        if ($lastNewLine === false) {
+            $lastNewLine = 0;
+        }
 
         while ($this->position < $lastNewLine) {
             $newLinePosition = strpos($raw, "\n", $this->position + 52);
-            if ($newLinePosition === false) break;
+            if ($newLinePosition === false) {
+                break;
+            }
 
             $slug = substr($raw, $this->position + 25, $newLinePosition - $this->position - 51);
             if (! isset($this->pathIds[$slug])) {
@@ -144,8 +141,6 @@ final class Parser
 
         $this->boundaries[] = $this->fileSize;
 
-        $totalCells = $this->pathCount * $this->dateCount;
-
         $tmpDir = sys_get_temp_dir();
         $myPid = getmypid();
 
@@ -153,24 +148,13 @@ final class Parser
             $tmpFile = "{$tmpDir}/workers-{$myPid}-{$worker}";
             $pid = pcntl_fork();
             if ($pid === 0) {
-                $wCounts = $this->parseRange($inputPath, $this->boundaries[$worker], $this->boundaries[$worker + 1]);
-                $fh = fopen($tmpFile, 'wb');
-                stream_set_write_buffer($fh, 1_048_576);
-                $packChunk = 65_536;
-                for ($i = 0; $i < $totalCells; $i += $packChunk) {
-                    $end = $i + $packChunk;
-                    if ($end > $totalCells) {
-                        $end = $totalCells;
-                    }
-                    fwrite($fh, pack('v*', ...array_slice($wCounts, $i, $end - $i)));
-                }
-                fclose($fh);
+                $this->parseRangeToSparseFile($inputPath, $this->boundaries[$worker], $this->boundaries[$worker + 1], $tmpFile);
                 exit(0);
             }
             $this->children[$pid] = $tmpFile;
         }
 
-        $counts = $this->parseRange($inputPath, $this->boundaries[static::WORKERS - 1], $this->boundaries[static::WORKERS]);
+        $counts = $this->parseRangeToCounts($inputPath, $this->boundaries[static::WORKERS - 1], $this->boundaries[static::WORKERS]);
 
         $pending = count($this->children);
         while ($pending > 0) {
@@ -184,21 +168,22 @@ final class Parser
             }
 
             $tmpFile = $this->children[$pid];
-            $wCounts = unpack('v*', file_get_contents($tmpFile));
+            $this->mergeSparseFileIntoCounts($tmpFile, $counts);
             unlink($tmpFile);
-            $j = 0;
-            foreach ($wCounts as $v) {
-                $counts[$j++] += $v;
-            }
             $pending--;
         }
 
         $this->writeJson($outputPath, $counts);
     }
 
-    protected function parseRange(string $inputPath, int $start, int $end): array
+    protected function parseRangeToCounts(string $inputPath, int $start, int $end): array
     {
-        $buckets = array_fill(0, $this->pathCount, '');
+        $counts = [];
+        $total = $this->pathCount * $this->dateCount;
+        for ($i = 0; $i < $total; $i++) {
+            $counts[$i] = 0;
+        }
+
         $handle = fopen($inputPath, 'rb');
         stream_set_read_buffer($handle, 0);
         fseek($handle, $start);
@@ -226,15 +211,6 @@ final class Parser
             }
 
             $position = 25;
-            $unrolledLoopLimit = $lastNewLine - 720;
-
-            while ($position < $unrolledLoopLimit) {
-                for ($i = 0; $i < 6; $i++) {
-                    $separatorPosition = strpos($chunk, ',', $position);
-                    $buckets[$this->pathIds[substr($chunk, $position, $separatorPosition - $position)]] .= $this->dateIdChars[substr($chunk, $separatorPosition + 3, 8)];
-                    $position = $separatorPosition + 52;
-                }
-            }
 
             while ($position < $lastNewLine) {
                 $separatorPosition = strpos($chunk, ',', $position);
@@ -242,29 +218,90 @@ final class Parser
                     break;
                 }
 
-                $buckets[$this->pathIds[substr($chunk, $position, $separatorPosition - $position)]] .= $this->dateIdChars[substr($chunk, $separatorPosition + 3, 8)];
+                $pathId = $this->pathIds[substr($chunk, $position, $separatorPosition - $position)];
+                $dateId = $this->dateIds[substr($chunk, $separatorPosition + 3, 8)];
+                $counts[$pathId * $this->dateCount + $dateId]++;
+
                 $position = $separatorPosition + 52;
             }
         }
 
         fclose($handle);
 
-        $counts = array_fill(0, $this->pathCount * $this->dateCount, 0);
-        for ($p = 0; $p < $this->pathCount; $p++) {
-            $bucket = $buckets[$p];
-            if ($bucket === '') {
+        return $counts;
+    }
+
+    protected function parseRangeToSparseFile(string $inputPath, int $start, int $end, string $outputPath): void
+    {
+        $counts = $this->parseRangeToCounts($inputPath, $start, $end);
+
+        $output = fopen($outputPath, 'wb');
+        stream_set_write_buffer($output, 1048576);
+
+        $total = $this->pathCount * $this->dateCount;
+        for ($cellIndex = 0; $cellIndex < $total; $cellIndex++) {
+            $count = $counts[$cellIndex];
+            if ($count === 0) {
                 continue;
             }
 
-            $offset = $p * $this->dateCount;
-            $len = strlen($bucket);
-            for ($i = 0; $i < $len; $i += 2) {
-                $did = ord($bucket[$i]) | (ord($bucket[$i + 1]) << 8);
-                $counts[$offset + $did]++;
+            fwrite(
+                $output,
+                chr($cellIndex & 0xFF)
+                . chr(($cellIndex >> 8) & 0xFF)
+                . chr(($cellIndex >> 16) & 0xFF)
+                . chr(($cellIndex >> 24) & 0xFF)
+                . chr($count & 0xFF)
+                . chr(($count >> 8) & 0xFF)
+            );
+        }
+
+        fclose($output);
+    }
+
+    protected function mergeSparseFileIntoCounts(string $filePath, array &$counts): void
+    {
+        $handle = fopen($filePath, 'rb');
+        stream_set_read_buffer($handle, 0);
+
+        $carry = '';
+
+        while (! feof($handle)) {
+            $chunk = fread($handle, 1048576);
+            if ($chunk === '' || $chunk === false) {
+                break;
+            }
+
+            if ($carry !== '') {
+                $chunk = $carry . $chunk;
+                $carry = '';
+            }
+
+            $len = strlen($chunk);
+            $usable = $len - ($len % 6);
+
+            if ($usable !== $len) {
+                $carry = substr($chunk, $usable);
+                $chunk = substr($chunk, 0, $usable);
+                $len = $usable;
+            }
+
+            for ($i = 0; $i < $len; $i += 6) {
+                $cellIndex =
+                    (ord($chunk[$i])
+                    | (ord($chunk[$i + 1]) << 8)
+                    | (ord($chunk[$i + 2]) << 16)
+                    | (ord($chunk[$i + 3]) << 24));
+
+                $count =
+                    (ord($chunk[$i + 4])
+                    | (ord($chunk[$i + 5]) << 8));
+
+                $counts[$cellIndex] += $count;
             }
         }
 
-        return $counts;
+        fclose($handle);
     }
 
     protected function writeJson(string $outputPath, array $counts): void
@@ -274,21 +311,21 @@ final class Parser
         fwrite($writeBinary, '{');
 
         $this->datePrefixes = [];
-        for ($dates = 0; $dates < $this->dateCount; $dates++) {
-            $this->datePrefixes[$dates] = "        \"20{$this->dates[$dates]}\": ";
+        for ($dateIndex = 0; $dateIndex < $this->dateCount; $dateIndex++) {
+            $this->datePrefixes[$dateIndex] = "        \"20{$this->dates[$dateIndex]}\": ";
         }
 
         $this->pathCount = count($this->paths);
-        for ($path = 0; $path < $this->pathCount; $path++) {
-            $this->escapedPaths[$path] = "\"\\/blog\\/" . str_replace('/', '\\/', $this->paths[$path]) . "\"";
+        for ($pathIndex = 0; $pathIndex < $this->pathCount; $pathIndex++) {
+            $this->escapedPaths[$pathIndex] = "\"\\/blog\\/" . str_replace('/', '\\/', $this->paths[$pathIndex]) . "\"";
         }
 
-        for ($path = 0; $path < $this->pathCount; $path++) {
-            $base = $path * $this->dateCount;
+        for ($pathIndex = 0; $pathIndex < $this->pathCount; $pathIndex++) {
+            $base = $pathIndex * $this->dateCount;
 
             $hasData = false;
-            for ($d = 0; $d < $this->dateCount; $d++) {
-                if ($counts[$base + $d] > 0) {
+            for ($dateIndex = 0; $dateIndex < $this->dateCount; $dateIndex++) {
+                if ($counts[$base + $dateIndex] > 0) {
                     $hasData = true;
                     break;
                 }
@@ -300,18 +337,18 @@ final class Parser
 
             $buffer = $this->firstPath ? "\n    " : ",\n    ";
             $this->firstPath = false;
-            $buffer .= $this->escapedPaths[$path] . ": {\n";
+            $buffer .= $this->escapedPaths[$pathIndex] . ": {\n";
 
             $this->firstDate = true;
-            for ($d = 0; $d < $this->dateCount; $d++) {
-                $count = $counts[$base + $d];
+            for ($dateIndex = 0; $dateIndex < $this->dateCount; $dateIndex++) {
+                $count = $counts[$base + $dateIndex];
                 if ($count === 0) {
                     continue;
                 }
 
                 $buffer .= $this->firstDate ? '' : ",\n";
                 $this->firstDate = false;
-                $buffer .= $this->datePrefixes[$d] . $count;
+                $buffer .= $this->datePrefixes[$dateIndex] . $count;
             }
 
             $buffer .= "\n    }";
