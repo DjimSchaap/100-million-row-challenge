@@ -198,7 +198,8 @@ final class Parser
 
     protected function parseRange(string $inputPath, int $start, int $end): array
     {
-        $buckets = array_fill(0, $this->pathCount, '');
+        $counts = array_fill(0, $this->pathCount * $this->dateCount, 0);
+
         $handle = fopen($inputPath, 'rb');
         stream_set_read_buffer($handle, 0);
         fseek($handle, $start);
@@ -208,6 +209,7 @@ final class Parser
             $toRead = $remaining > static::READ_CHUNK ? static::READ_CHUNK : $remaining;
             $chunk = fread($handle, $toRead);
             $chunkLen = strlen($chunk);
+
             if ($chunkLen === 0) {
                 break;
             }
@@ -215,11 +217,13 @@ final class Parser
             $remaining -= $chunkLen;
 
             $lastNewLine = strrpos($chunk, "\n");
+
             if ($lastNewLine === false) {
                 break;
             }
 
             $tail = $chunkLen - $lastNewLine - 1;
+
             if ($tail > 0) {
                 fseek($handle, -$tail, SEEK_CUR);
                 $remaining += $tail;
@@ -231,38 +235,33 @@ final class Parser
             while ($position < $unrolledLoopLimit) {
                 for ($i = 0; $i < 6; $i++) {
                     $separatorPosition = strpos($chunk, ',', $position);
-                    $buckets[$this->pathIds[substr($chunk, $position, $separatorPosition - $position)]] .= $this->dateIdChars[substr($chunk, $separatorPosition + 3, 8)];
+
+                    $pathId = $this->pathIds[substr($chunk, $position, $separatorPosition - $position)];
+                    $dateId = $this->dateIds[substr($chunk, $separatorPosition + 3, 8)];
+
+                    $counts[$pathId * $this->dateCount + $dateId]++;
+
                     $position = $separatorPosition + 52;
                 }
             }
 
             while ($position < $lastNewLine) {
                 $separatorPosition = strpos($chunk, ',', $position);
+
                 if ($separatorPosition === false || $separatorPosition >= $lastNewLine) {
                     break;
                 }
 
-                $buckets[$this->pathIds[substr($chunk, $position, $separatorPosition - $position)]] .= $this->dateIdChars[substr($chunk, $separatorPosition + 3, 8)];
+                $pathId = $this->pathIds[substr($chunk, $position, $separatorPosition - $position)];
+                $dateId = $this->dateIds[substr($chunk, $separatorPosition + 3, 8)];
+
+                $counts[$pathId * $this->dateCount + $dateId]++;
+
                 $position = $separatorPosition + 52;
             }
         }
 
         fclose($handle);
-
-        $counts = array_fill(0, $this->pathCount * $this->dateCount, 0);
-        for ($p = 0; $p < $this->pathCount; $p++) {
-            $bucket = $buckets[$p];
-            if ($bucket === '') {
-                continue;
-            }
-
-            $offset = $p * $this->dateCount;
-            $len = strlen($bucket);
-            for ($i = 0; $i < $len; $i += 2) {
-                $did = ord($bucket[$i]) | (ord($bucket[$i + 1]) << 8);
-                $counts[$offset + $did]++;
-            }
-        }
 
         return $counts;
     }
