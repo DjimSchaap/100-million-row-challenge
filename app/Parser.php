@@ -5,7 +5,6 @@ namespace App;
 use const AF_UNIX;
 use const SEEK_CUR;
 use const SOCK_STREAM;
-use const WNOHANG;
 
 use function array_count_values;
 use function array_fill;
@@ -137,18 +136,11 @@ final class Parser
 
         $counts = self::parseRange($inputPath, $boundaries[self::WORKERS - 1], $boundaries[self::WORKERS], $pathIds, $dateIdChars, $pathCount, $dateCount);
 
-        $pending = count($children);
-        while ($pending > 0) {
-            $pid = pcntl_wait($status, WNOHANG);
-            if ($pid <= 0) {
-                $pid = pcntl_wait($status);
-            }
-
-            if (! isset($children[$pid])) {
-                continue;
-            }
-
-            $socket = $children[$pid];
+        // Read from all child sockets first to avoid deadlock: children may
+        // block on socket_write if the kernel buffer is full, so the parent
+        // must drain the sockets before waiting for children to exit.
+        $childData = [];
+        foreach ($children as $pid => $socket) {
             $raw = '';
             while (strlen($raw) < $segmentSize) {
                 $chunk = socket_read($socket, $segmentSize - strlen($raw));
@@ -156,11 +148,22 @@ final class Parser
                 $raw .= $chunk;
             }
             socket_close($socket);
+            $childData[] = $raw;
+        }
+
+        // Reap all child processes.
+        $pending = count($children);
+        while ($pending > 0) {
+            pcntl_wait($status);
+            $pending--;
+        }
+
+        // Merge child results into counts.
+        foreach ($childData as $raw) {
             $rawLength = strlen($raw);
             for ($j = 0; $j < $rawLength; $j += 2) {
                 $counts[$j >> 1] += ord($raw[$j]) | (ord($raw[$j + 1]) << 8);
             }
-            $pending--;
         }
 
         self::writeJson($outputPath, $counts, $paths, $dates, $dateCount);
