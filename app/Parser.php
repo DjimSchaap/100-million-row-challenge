@@ -136,9 +136,6 @@ final class Parser
 
         $counts = self::parseRange($inputPath, $boundaries[self::WORKERS - 1], $boundaries[self::WORKERS], $pathIds, $dateIdChars, $pathCount, $dateCount);
 
-        // Read from all child sockets first to avoid deadlock: children may
-        // block on socket_write if the kernel buffer is full, so the parent
-        // must drain the sockets before waiting for children to exit.
         $childData = [];
         foreach ($children as $pid => $socket) {
             $raw = '';
@@ -151,14 +148,12 @@ final class Parser
             $childData[] = $raw;
         }
 
-        // Reap all child processes.
         $pending = count($children);
         while ($pending > 0) {
             pcntl_wait($status);
             $pending--;
         }
 
-        // Merge child results into counts.
         foreach ($childData as $raw) {
             $rawLength = strlen($raw);
             for ($j = 0; $j < $rawLength; $j += 2) {
