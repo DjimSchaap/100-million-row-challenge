@@ -11,20 +11,23 @@ use function chr;
 use function count;
 use function fclose;
 use function fgets;
-use function file_get_contents;
-use function file_put_contents;
 use function filesize;
 use function fopen;
 use function fread;
 use function fseek;
 use function ftell;
+use function ftok;
 use function fwrite;
 use function gc_disable;
-use function getmypid;
 use function implode;
+use function ord;
 use function pack;
 use function pcntl_fork;
 use function pcntl_wait;
+use function shmop_delete;
+use function shmop_open;
+use function shmop_read;
+use function shmop_write;
 use function str_replace;
 use function stream_set_read_buffer;
 use function stream_set_write_buffer;
@@ -32,15 +35,13 @@ use function strlen;
 use function strpos;
 use function strrpos;
 use function substr;
-use function sys_get_temp_dir;
-use function unlink;
 use function unpack;
 
 final class Parser
 {
-    private const int WORKERS = 10;
+    private const int WORKERS = 8;
 
-    private const int READ_CHUNK = 163_840;
+    private const int READ_CHUNK = 1_048_576;
 
     public static function parse($inputPath, $outputPath)
     {
@@ -72,7 +73,7 @@ final class Parser
 
         $binaryResource = fopen($inputPath, 'rb');
         stream_set_read_buffer($binaryResource, 0);
-        $warmUpSize = $fileSize > 163_840 ? 163_840 : $fileSize;
+        $warmUpSize = $fileSize > 1_048_576 ? 1_048_576 : $fileSize;
         $raw = fread($binaryResource, $warmUpSize);
 
         $boundaries = [0];
@@ -108,19 +109,19 @@ final class Parser
 
         $boundaries[] = $fileSize;
 
-        $tmpDir = sys_get_temp_dir();
-        $myPid = getmypid();
+        $segmentSize = $pathCount * $dateCount * 2;
         $children = [];
 
         for ($w = 0; $w < self::WORKERS - 1; $w++) {
-            $tmpFile = "{$tmpDir}/p-{$myPid}-{$w}";
+            $shmKey = ftok(__FILE__, chr($w + 1));
+            $shmId = shmop_open($shmKey, 'c', 0644, $segmentSize);
             $pid = pcntl_fork();
             if ($pid === 0) {
                 $wCounts = self::parseRange($inputPath, $boundaries[$w], $boundaries[$w + 1], $pathIds, $dateIdChars, $pathCount, $dateCount);
-                file_put_contents($tmpFile, pack('v*', ...$wCounts));
+                shmop_write($shmId, pack('v*', ...$wCounts), 0);
                 exit(0);
             }
-            $children[$pid] = $tmpFile;
+            $children[$pid] = $shmId;
         }
 
         $counts = self::parseRange($inputPath, $boundaries[self::WORKERS - 1], $boundaries[self::WORKERS], $pathIds, $dateIdChars, $pathCount, $dateCount);
@@ -136,13 +137,12 @@ final class Parser
                 continue;
             }
 
-            $tmpFile = $children[$pid];
-            $wCounts = unpack('v*', file_get_contents($tmpFile));
-            unlink($tmpFile);
-            $j = 0;
-            foreach ($wCounts as $v) {
-                $counts[$j] += $v;
-                $j++;
+            $shmId = $children[$pid];
+            $raw = shmop_read($shmId, 0, $segmentSize);
+            shmop_delete($shmId);
+            $rawLength = strlen($raw);
+            for ($j = 0; $j < $rawLength; $j += 2) {
+                $counts[$j >> 1] += ord($raw[$j]) | (ord($raw[$j + 1]) << 8);
             }
             $pending--;
         }
@@ -239,7 +239,7 @@ final class Parser
     private static function writeJson($outputPath, $counts, $paths, $dates, $dateCount)
     {
         $out = fopen($outputPath, 'wb');
-        stream_set_write_buffer($out, 1_048_576);
+        stream_set_write_buffer($out, 4_194_304);
         fwrite($out, '{');
 
         $pathCount = count($paths);
