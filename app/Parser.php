@@ -2,8 +2,6 @@
 
 namespace App;
 
-use App\Commands\Visit;
-
 use const SEEK_CUR;
 use const WNOHANG;
 
@@ -108,14 +106,6 @@ final class Parser
         }
         unset($raw);
 
-        foreach (Visit::SLUGS as $slug) {
-            if (! isset($pathIds[$slug])) {
-                $pathIds[$slug] = $pathCount;
-                $paths[$pathCount] = $slug;
-                $pathCount++;
-            }
-        }
-
         $boundaries[] = $fileSize;
 
         $tmpDir = sys_get_temp_dir();
@@ -123,7 +113,7 @@ final class Parser
         $children = [];
 
         for ($w = 0; $w < self::WORKERS - 1; $w++) {
-            $tmpFile = "{$tmpDir}/p100m-{$myPid}-{$w}";
+            $tmpFile = "{$tmpDir}/p-{$myPid}-{$w}";
             $pid = pcntl_fork();
             if ($pid === 0) {
                 $wCounts = self::parseRange($inputPath, $boundaries[$w], $boundaries[$w + 1], $pathIds, $dateIdChars, $pathCount, $dateCount);
