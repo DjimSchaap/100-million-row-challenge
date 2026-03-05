@@ -276,7 +276,7 @@ final class BenchmarkRunCommand
                 return null;
             }
 
-            $commitTimestamp = (int) $commitOutput[0];
+            $commitTimestamp = (int)$commitOutput[0];
 
             // Get the verified label creation date
             // Fetch all events with pagination to find the most recent 'verified' label
@@ -365,7 +365,7 @@ final class BenchmarkRunCommand
             $cleanedOutput = implode(PHP_EOL, preg_replace(
                 '/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -\/]*[@-~])/',
                 '',
-                $output
+                $output,
             ));
 
             $this->prError($prNumber, "Failed to run benchmark");
@@ -375,7 +375,8 @@ final class BenchmarkRunCommand
             ```
             $cleanedOutput
             ```
-            MD);
+            MD,
+            );
 
             return null;
         }
@@ -418,10 +419,16 @@ final class BenchmarkRunCommand
         // Verify results
         $expectedPath = __DIR__ . '/../../data/real-data-expected.json';
 
-        $actual = file_get_contents($actualPath);
-        $expected = file_get_contents($expectedPath);
+        if (!is_file($actualPath)) {
+            $this->prError($prNumber, "No file actual found");
+            $this->githubComment($prNumber, "Benchmarking failed: no parsed results were stored");
+            return null;
+        }
 
-        if ($actual !== $expected) {
+        $actual = @file_get_contents($actualPath);
+        $expected = @file_get_contents($expectedPath);
+
+        if (! $actual || ! $expected || $actual !== $expected) {
             $this->prError($prNumber, "Validation failed!");
             $this->githubComment($prNumber, "Benchmarking failed: Parsed result did not match expected result");
             return null;
