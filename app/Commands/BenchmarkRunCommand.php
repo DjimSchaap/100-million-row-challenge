@@ -382,16 +382,17 @@ final class BenchmarkRunCommand
         }
 
         // Parse results
-        $results = json_decode(file_get_contents($resultFile), true);
-        $meanTime = $results['results'][0]['mean'] ?? null;
+        $resultJson = file_get_contents($resultFile);
+        $results = json_decode($resultJson, true);
+        $minTime = $results['results'][0]['mean'] ?? null;
 
-        if ($meanTime === null) {
+        if ($minTime === null) {
             $this->prError($prNumber, "Failed to parse benchmark results");
             $this->githubComment($prNumber, 'Benchmarking failed: Unable to parse results');
             return null;
         }
 
-        if ($meanTime < 20) {
+        if ($minTime < 5) {
             // Second run for fast PRs
             $command = sprintf(
                 "hyperfine --warmup 2 --runs 5 --prepare=%s --export-json %s 'cd %s && %s'",
@@ -412,9 +413,12 @@ final class BenchmarkRunCommand
             }
 
             // Parse results
-            $results = json_decode(file_get_contents($resultFile), true);
-            $meanTime = $results['results'][0]['mean'] ?? null;
+            $resultJson = file_get_contents($resultFile);
+            $results = json_decode($resultJson, true);
+            $minTime = $results['results'][0]['min'] ?? null;
         }
+
+        $minTime = floor($minTime * 1000) / 1000;
 
         // Verify results
         $expectedPath = __DIR__ . '/../../data/real-data-expected.json';
@@ -435,13 +439,21 @@ final class BenchmarkRunCommand
         }
 
         // Post results
-        $this->prSuccess($prNumber, "Benchmark complete: {$meanTime}s");
-        $this->githubComment($prNumber, "Benchmarking complete! Mean execution time: **{$meanTime}s**");
+        $this->prSuccess($prNumber, "Benchmark complete: {$minTime}s");
+        $this->githubComment($prNumber, <<<MD
+        Benchmarking complete! Best execution time: **{$minTime}s**
+        
+        Full results:
+        
+        ```json
+        {$resultJson}
+        ```
+        MD);
 
         // Clean up
         exec("rm -rf " . escapeshellarg($benchmarkDir));
 
-        return $meanTime;
+        return $minTime;
     }
 
     private function addLeaderboardResult(string $file, int $prNumber, string $branch, ?float $newTime): void
