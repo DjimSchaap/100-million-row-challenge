@@ -13,9 +13,8 @@ use function fseek;
 use function ftell;
 use function fwrite;
 use function gc_disable;
-use function implode;
-use function intdiv;
 use function pcntl_fork;
+use function str_repeat;
 use function stream_select;
 use function stream_set_chunk_size;
 use function stream_set_read_buffer;
@@ -23,8 +22,6 @@ use function stream_set_write_buffer;
 use function stream_socket_pair;
 use function strlen;
 use function strpos;
-use function str_repeat;
-use function str_replace;
 use function strrpos;
 use function substr;
 use function unpack;
@@ -57,12 +54,12 @@ final class Parser
                 };
 
                 $monthString = ($month < 10 ? '0' : '') . $month;
-                $yearMonthPrefix = $year . '-' . $monthString . '-';
+                $yearMonthPrefix = ($year % 10) . '-' . $monthString . '-';
 
                 for ($day = 1; $day <= $maxDay; $day++) {
                     $date = $yearMonthPrefix . (($day < 10 ? '0' : '') . $day);
                     $dateIdentifierByDate[$date] = $dateCount;
-                    $datesByIdentifier[$dateCount] = '20' . $date;
+                    $datesByIdentifier[$dateCount] = '20' . $year . '-' . $monthString . '-' . (($day < 10 ? '0' : '') . $day);
                     $dateCount++;
                 }
             }
@@ -82,11 +79,9 @@ final class Parser
         $slugBySlugIdentifier = [];
         $slugCount = 0;
         $position = 0;
-        $lastNewlinePosition = strrpos($raw, "\n");
-        if ($lastNewlinePosition === false) {
-            $lastNewlinePosition = 0;
-        }
+        $lastNewlinePosition = strrpos($raw, "\n") ?: 0;
 
+        $noNewCount = 0;
         while ($position < $lastNewlinePosition) {
             $newlinePosition = strpos($raw, "\n", $position + 52);
             if ($newlinePosition === false) {
@@ -99,15 +94,20 @@ final class Parser
                 $slugBySlugIdentifier[$slugCount] = $slug;
                 $slugBaseOffsetBySlug[$slug] = $slugCount * $dateCount;
                 $slugCount++;
+                $noNewCount = 0;
+            } elseif (++$noNewCount > 5000) {
+                break;
             }
 
             $position = $newlinePosition + 1;
         }
         unset($raw);
 
+        $outputSize = $slugCount * $dateCount;
+
         fseek($boundaryHandle, 0, SEEK_END);
         $fileSize = ftell($boundaryHandle);
-        $step = intdiv($fileSize, self::WORKER_COUNT);
+        $step = $fileSize >> 3;
 
         $boundaries = [0];
         for ($worker = 1; $worker < self::WORKER_COUNT; $worker++) {
@@ -118,16 +118,16 @@ final class Parser
         $boundaries[] = $fileSize;
         fclose($boundaryHandle);
 
-        $outputSize = $slugCount * $dateCount;
         $sockets = [];
 
-        for ($worker = 0; $worker < self::WORKER_COUNT; $worker++) {
+        $worker = self::WORKER_COUNT;
+        while ($worker-- > 0) {
             $pair = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
             stream_set_chunk_size($pair[0], $outputSize);
             stream_set_chunk_size($pair[1], $outputSize);
 
             if (pcntl_fork() === 0) {
-                $output = self::parseRange(
+                fwrite($pair[1], self::parseRange(
                     $inputPath,
                     $boundaries[$worker],
                     $boundaries[$worker + 1],
@@ -135,9 +135,7 @@ final class Parser
                     $dateIdentifierByDate,
                     $next,
                     $outputSize,
-                );
-                fwrite($pair[1], $output);
-                fclose($pair[1]);
+                ));
                 exit(0);
             }
 
@@ -148,27 +146,27 @@ final class Parser
         $counts = array_fill(0, $outputSize, 0);
         $offsetByWorker = array_fill(0, self::WORKER_COUNT, 0);
 
+        $write = [];
+        $except = [];
         while ($sockets !== []) {
             $read = $sockets;
-            $write = [];
-            $except = [];
             stream_select($read, $write, $except, 5);
 
-            foreach ($read as $worker => $socket) {
+            foreach ($read as $key => $socket) {
                 $data = fread($socket, $outputSize);
 
                 if ($data !== '' && $data !== false) {
-                    $offset = $offsetByWorker[$worker];
+                    $offset = $offsetByWorker[$key];
                     foreach (unpack('C*', $data) as $value) {
                         $counts[$offset] += $value;
                         $offset++;
                     }
-                    $offsetByWorker[$worker] = $offset;
+                    $offsetByWorker[$key] = $offset;
                 }
 
                 if (feof($socket)) {
                     fclose($socket);
-                    unset($sockets[$worker]);
+                    unset($sockets[$key]);
                 }
             }
         }
@@ -220,12 +218,55 @@ final class Parser
             $unrolledFence = $lastNewlinePosition - 1010;
 
             while ($position < $unrolledFence) {
-                for ($i = 0; $i < 10; $i++) {
-                    $separatorPosition = strpos($chunk, ',', $position);
-                    $index = $slugBaseOffsetBySlug[substr($chunk, $position, $separatorPosition - $position)] + $dateIdentifierByDate[substr($chunk, $separatorPosition + 3, 8)];
-                    $output[$index] = $next[$output[$index]];
-                    $position = $separatorPosition + 52;
-                }
+                $separatorPosition = strpos($chunk, ',', $position);
+                $index = $slugBaseOffsetBySlug[substr($chunk, $position, $separatorPosition - $position)] + $dateIdentifierByDate[substr($chunk, $separatorPosition + 4, 7)];
+                $output[$index] = $next[$output[$index]];
+                $position = $separatorPosition + 52;
+
+                $separatorPosition = strpos($chunk, ',', $position);
+                $index = $slugBaseOffsetBySlug[substr($chunk, $position, $separatorPosition - $position)] + $dateIdentifierByDate[substr($chunk, $separatorPosition + 4, 7)];
+                $output[$index] = $next[$output[$index]];
+                $position = $separatorPosition + 52;
+
+                $separatorPosition = strpos($chunk, ',', $position);
+                $index = $slugBaseOffsetBySlug[substr($chunk, $position, $separatorPosition - $position)] + $dateIdentifierByDate[substr($chunk, $separatorPosition + 4, 7)];
+                $output[$index] = $next[$output[$index]];
+                $position = $separatorPosition + 52;
+
+                $separatorPosition = strpos($chunk, ',', $position);
+                $index = $slugBaseOffsetBySlug[substr($chunk, $position, $separatorPosition - $position)] + $dateIdentifierByDate[substr($chunk, $separatorPosition + 4, 7)];
+                $output[$index] = $next[$output[$index]];
+                $position = $separatorPosition + 52;
+
+                $separatorPosition = strpos($chunk, ',', $position);
+                $index = $slugBaseOffsetBySlug[substr($chunk, $position, $separatorPosition - $position)] + $dateIdentifierByDate[substr($chunk, $separatorPosition + 4, 7)];
+                $output[$index] = $next[$output[$index]];
+                $position = $separatorPosition + 52;
+
+                $separatorPosition = strpos($chunk, ',', $position);
+                $index = $slugBaseOffsetBySlug[substr($chunk, $position, $separatorPosition - $position)] + $dateIdentifierByDate[substr($chunk, $separatorPosition + 4, 7)];
+                $output[$index] = $next[$output[$index]];
+                $position = $separatorPosition + 52;
+
+                $separatorPosition = strpos($chunk, ',', $position);
+                $index = $slugBaseOffsetBySlug[substr($chunk, $position, $separatorPosition - $position)] + $dateIdentifierByDate[substr($chunk, $separatorPosition + 4, 7)];
+                $output[$index] = $next[$output[$index]];
+                $position = $separatorPosition + 52;
+
+                $separatorPosition = strpos($chunk, ',', $position);
+                $index = $slugBaseOffsetBySlug[substr($chunk, $position, $separatorPosition - $position)] + $dateIdentifierByDate[substr($chunk, $separatorPosition + 4, 7)];
+                $output[$index] = $next[$output[$index]];
+                $position = $separatorPosition + 52;
+
+                $separatorPosition = strpos($chunk, ',', $position);
+                $index = $slugBaseOffsetBySlug[substr($chunk, $position, $separatorPosition - $position)] + $dateIdentifierByDate[substr($chunk, $separatorPosition + 4, 7)];
+                $output[$index] = $next[$output[$index]];
+                $position = $separatorPosition + 52;
+
+                $separatorPosition = strpos($chunk, ',', $position);
+                $index = $slugBaseOffsetBySlug[substr($chunk, $position, $separatorPosition - $position)] + $dateIdentifierByDate[substr($chunk, $separatorPosition + 4, 7)];
+                $output[$index] = $next[$output[$index]];
+                $position = $separatorPosition + 52;
             }
 
             while ($position < $lastNewlinePosition) {
@@ -234,7 +275,7 @@ final class Parser
                     break;
                 }
 
-                $index = $slugBaseOffsetBySlug[substr($chunk, $position, $separatorPosition - $position)] + $dateIdentifierByDate[substr($chunk, $separatorPosition + 3, 8)];
+                $index = $slugBaseOffsetBySlug[substr($chunk, $position, $separatorPosition - $position)] + $dateIdentifierByDate[substr($chunk, $separatorPosition + 4, 7)];
                 $output[$index] = $next[$output[$index]];
                 $position = $separatorPosition + 52;
             }
@@ -257,27 +298,32 @@ final class Parser
         stream_set_write_buffer($outputHandle, 1_048_576);
         fwrite($outputHandle, '{');
 
+        $firstDatePrefixByDateIdentifier = [];
         $datePrefixByDateIdentifier = [];
-        for ($dateIdentifier = 0; $dateIdentifier < $dateCount; $dateIdentifier++) {
-            $datePrefixByDateIdentifier[$dateIdentifier] = '        "' . $datesByIdentifier[$dateIdentifier] . '": ';
+        $dateIdentifier = $dateCount;
+        while ($dateIdentifier-- > 0) {
+            $firstDatePrefixByDateIdentifier[$dateIdentifier] = "\n        \"" . $datesByIdentifier[$dateIdentifier] . '": ';
+            $datePrefixByDateIdentifier[$dateIdentifier] = ",\n        \"" . $datesByIdentifier[$dateIdentifier] . '": ';
         }
 
         $escapedPathBySlugIdentifier = [];
-        for ($slugIdentifier = 0; $slugIdentifier < $slugCount; $slugIdentifier++) {
-            $escapedPathBySlugIdentifier[$slugIdentifier] = '"\/blog\/' . str_replace('/', '\/', $slugBySlugIdentifier[$slugIdentifier]) . '": {';
+        $slugIdentifier = $slugCount;
+        while ($slugIdentifier-- > 0) {
+            $escapedPathBySlugIdentifier[$slugIdentifier] = '"\/blog\/' . $slugBySlugIdentifier[$slugIdentifier] . '": {';
         }
 
-        $isFirstPath = true;
+        $separator = "\n    ";
         $base = 0;
 
         for ($slugIdentifier = 0; $slugIdentifier < $slugCount; $slugIdentifier++) {
             $firstNonZeroDateIdentifier = -1;
-
+            $index = $base;
             for ($dateIdentifier = 0; $dateIdentifier < $dateCount; $dateIdentifier++) {
-                if ($counts[$base + $dateIdentifier] !== 0) {
+                if ($counts[$index] !== 0) {
                     $firstNonZeroDateIdentifier = $dateIdentifier;
                     break;
                 }
+                $index++;
             }
 
             if ($firstNonZeroDateIdentifier === -1) {
@@ -285,17 +331,16 @@ final class Parser
                 continue;
             }
 
-            $buffer = $isFirstPath ? "\n    " : ",\n    ";
-            $isFirstPath = false;
-            $buffer .= $escapedPathBySlugIdentifier[$slugIdentifier] . "\n" . $datePrefixByDateIdentifier[$firstNonZeroDateIdentifier] . $counts[$base + $firstNonZeroDateIdentifier];
+            $buffer = $separator . $escapedPathBySlugIdentifier[$slugIdentifier] . $firstDatePrefixByDateIdentifier[$firstNonZeroDateIdentifier] . $counts[$index];
+            $separator = ",\n    ";
 
             for ($dateIdentifier = $firstNonZeroDateIdentifier + 1; $dateIdentifier < $dateCount; $dateIdentifier++) {
-                $count = $counts[$base + $dateIdentifier];
-                if ($count === 0) {
+                $index++;
+                if ($counts[$index] === 0) {
                     continue;
                 }
 
-                $buffer .= ",\n" . $datePrefixByDateIdentifier[$dateIdentifier] . $count;
+                $buffer .= $datePrefixByDateIdentifier[$dateIdentifier] . $counts[$index];
             }
 
             $buffer .= "\n    }";
